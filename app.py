@@ -1,47 +1,34 @@
 # ══════════════════════════════════════════════════════════════════════
 #  FLUX Image Studio — Nexflow Studio
-#  Production build — GitHub + HuggingFace Spaces ZeroGPU
+#  Production build — GitHub + HuggingFace Spaces (CPU Basic, free)
 #
-#  Image Model : FLUX.1-schnell  (Apache 2.0, Black Forest Labs)
-#  Prompt AI   : Qwen2.5-7B-Instruct (free HF Inference API)
-#  GPU         : HuggingFace ZeroGPU H200 (free)
-#  Consistency : Fixed-seed grid, style-locked batch generation
-#  Speed       : ~15s for 4 images at 1024px
+#  Image Model : FLUX.1-schnell via HF Inference API (real images, free)
+#  Prompt AI   : Qwen2.5-7B-Instruct via HF Inference API (free)
+#  Hardware    : CPU Basic (free) — no GPU, no card needed
+#  Speed       : ~15-30s per image via HF API
 # ══════════════════════════════════════════════════════════════════════
 
 import gradio as gr
-import torch
-import spaces
 import random
 import io
 import os
 import zipfile
 import time
-from diffusers import FluxPipeline
+import base64
 from huggingface_hub import InferenceClient
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
 # ─── Config ─────────────────────────────────────────────────────────
-MODEL_ID   = "black-forest-labs/FLUX.1-schnell"
-LLM_MODEL  = "Qwen/Qwen2.5-7B-Instruct"
-HF_TOKEN   = os.environ.get("HF_TOKEN", None)
-MAX_IMAGES = 4
+HF_TOKEN  = os.environ.get("HF_TOKEN", None)
+IMG_MODEL = "black-forest-labs/FLUX.1-schnell"
+LLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+MAX_IMGS  = 4
 
-# ─── Load FLUX pipeline ─────────────────────────────────────────────
-print("⏳ Loading FLUX.1-schnell...")
-pipe = FluxPipeline.from_pretrained(
-    MODEL_ID,
-    torch_dtype=torch.bfloat16,
-)
-pipe.vae.enable_tiling()
-pipe.vae.enable_slicing()
-print("✅ FLUX.1-schnell ready.")
-
-# ─── HF Inference client ────────────────────────────────────────────
+# ─── HF Inference Client ────────────────────────────────────────────
 client = InferenceClient(token=HF_TOKEN)
 
 # ════════════════════════════════════════════════════════════════════
-#  STYLE PRESETS  (16 styles — each a full cinematic descriptor)
+#  STYLE PRESETS
 # ════════════════════════════════════════════════════════════════════
 STYLES = {
     "✨ None (Raw)": "",
@@ -77,8 +64,7 @@ STYLES = {
     ),
     "👾 Pixel Art": (
         "crisp 16-bit pixel art, retro JRPG aesthetic, clean pixel-perfect "
-        "sprite work, vibrant limited palette, nostalgic game art style, "
-        "isometric or flat 2D perspective"
+        "sprite work, vibrant limited palette, nostalgic game art style"
     ),
     "⚡ Neon Cyberpunk": (
         "cyberpunk dystopian cityscape, vivid neon signs in purple cyan magenta, "
@@ -142,7 +128,7 @@ NEG_DEFAULT = (
 )
 
 # ════════════════════════════════════════════════════════════════════
-#  PROMPT ENHANCEMENT  (Qwen2.5-7B via HF free inference API)
+#  PROMPT ENHANCEMENT
 # ════════════════════════════════════════════════════════════════════
 ENHANCE_SYSTEM = """You are a world-class AI image prompt engineer specializing in FLUX.1 diffusion models.
 
@@ -150,11 +136,10 @@ Transform any short user prompt into a rich, detailed, photographic generation p
 
 RULES:
 1. Preserve the EXACT subject, setting, and intent of the original
-2. Add specific details: lighting quality, camera lens, composition rule, color palette, atmosphere, texture, mood
+2. Add specific details: lighting quality, camera lens, composition, color palette, atmosphere, texture, mood
 3. Use natural comma-separated phrases — never bullet points or numbered lists
 4. Maximum 130 words
 5. Output ONLY the enhanced prompt — zero preamble, zero explanation, no quotes
-6. Make it so vivid and specific that the model generates a stunning, consistent image every time
 """
 
 def enhance_prompt(raw: str, enabled: bool) -> str:
@@ -172,51 +157,50 @@ def enhance_prompt(raw: str, enabled: bool) -> str:
             max_tokens=200,
             temperature=0.65,
         )
-        enhanced = resp.choices[0].message.content.strip()
-        # Strip any accidental quotes
-        enhanced = enhanced.strip('"').strip("'")
+        enhanced = resp.choices[0].message.content.strip().strip('"').strip("'")
         return enhanced if len(enhanced) > 15 else raw.strip()
     except Exception as e:
-        print(f"⚠️ Prompt enhancement failed: {e}")
+        print(f"⚠️ Enhancement failed: {e}")
         return raw.strip()
 
 # ════════════════════════════════════════════════════════════════════
-#  CORE GENERATION  (ZeroGPU H200)
+#  IMAGE GENERATION via HF Inference API
 # ════════════════════════════════════════════════════════════════════
-@spaces.GPU(duration=180)
-def generate_on_gpu(
+def generate_images(
     prompt: str,
     num_images: int,
     width: int,
     height: int,
-    steps: int,
-    guidance: float,
     seed: int,
 ) -> tuple:
-    pipe.to("cuda")
+    if not HF_TOKEN:
+        raise ValueError(
+            "HF_TOKEN not set. Add it in Space Settings → Variables and Secrets."
+        )
 
     actual_seed = seed if seed != -1 else random.randint(0, 2**32 - 1)
-
-    # ── Consistency: all images in a batch share the same base seed
-    #    offset by index so they differ but stay coherent ──────────
     images = []
+
     for i in range(num_images):
-        g = torch.Generator("cuda").manual_seed(actual_seed + i)
-        out = pipe(
-            prompt              = prompt,
-            num_inference_steps = steps,
-            guidance_scale      = guidance,
-            width               = width,
-            height              = height,
-            generator           = g,
-            max_sequence_length = 512,
+        img_bytes = client.text_to_image(
+            prompt,
+            model=IMG_MODEL,
+            width=width,
+            height=height,
+            num_inference_steps=4,
+            guidance_scale=0.0,
+            seed=actual_seed + i,
         )
-        images.append(out.images[0])
+        # HF API returns PIL Image directly
+        if isinstance(img_bytes, Image.Image):
+            images.append(img_bytes)
+        else:
+            images.append(Image.open(io.BytesIO(img_bytes)))
 
     return images, actual_seed
 
 # ════════════════════════════════════════════════════════════════════
-#  ZIP  helper
+#  ZIP helper
 # ════════════════════════════════════════════════════════════════════
 def make_zip(images: list, seed: int) -> str:
     path = f"/tmp/nexflow_{seed}.zip"
@@ -237,12 +221,18 @@ def pipeline(
     if not raw_prompt.strip():
         return [], "⚠️ Please enter a prompt first.", "", None, gr.update(visible=False)
 
+    if not HF_TOKEN:
+        return [], (
+            "❌ HF_TOKEN not set.\n"
+            "Go to: Space Settings → Variables and Secrets → Add HF_TOKEN"
+        ), "", None, gr.update(visible=False)
+
     t0 = time.time()
 
-    # 1. Enhance
+    # 1. Enhance prompt
     enhanced = enhance_prompt(raw_prompt, use_enhance)
 
-    # 2. Style suffix
+    # 2. Apply style
     suffix = STYLES.get(style, "")
     final  = f"{enhanced}, {suffix}" if suffix else enhanced
 
@@ -251,18 +241,14 @@ def pipeline(
 
     # 4. Generate
     try:
-        images, actual_seed = generate_on_gpu(
-            final, int(num_images), w, h,
-            int(steps), float(guidance), int(seed),
-        )
+        images, actual_seed = generate_images(final, int(num_images), w, h, int(seed))
         elapsed = time.time() - t0
         status  = (
-            f"✅ {len(images)} image(s) · "
+            f"✅ {len(images)} image(s) ready · "
             f"{elapsed:.1f}s · "
             f"Seed {actual_seed} · "
             f"{w}×{h} · "
-            f"Steps {steps} · "
-            f"Enhanced: {use_enhance}"
+            f"FLUX.1-schnell via HF API"
         )
         zip_path = make_zip(images, actual_seed)
         return images, status, final, zip_path, gr.update(visible=True)
@@ -270,13 +256,12 @@ def pipeline(
     except Exception as e:
         err = str(e)
         print(f"❌ Generation error: {err}")
-        return [], f"❌ {err}", final, None, gr.update(visible=False)
+        return [], f"❌ Error: {err}", final, None, gr.update(visible=False)
 
 # ════════════════════════════════════════════════════════════════════
 #  GRADIO UI
 # ════════════════════════════════════════════════════════════════════
 CSS = """
-/* ── Global ── */
 * { box-sizing: border-box; }
 .generate-btn {
     background: linear-gradient(135deg,#5b21b6,#7c3aed,#a855f7,#ec4899) !important;
@@ -294,7 +279,6 @@ CSS = """
     transform: translateY(-2px) scale(1.01) !important;
     box-shadow: 0 8px 32px rgba(139,92,246,0.55) !important;
 }
-/* ── Hero ── */
 #hero { text-align:center; padding:16px 0 28px; }
 #hero h1 {
     font-size:2.4rem; font-weight:900; letter-spacing:-0.02em;
@@ -302,38 +286,31 @@ CSS = """
     -webkit-background-clip:text; -webkit-text-fill-color:transparent;
     margin-bottom:10px;
 }
-/* ── Badges ── */
 .badge {
     display:inline-block; padding:4px 14px; border-radius:99px;
     font-size:0.72rem; font-weight:600; letter-spacing:0.03em;
     margin:3px; border:1px solid rgba(139,92,246,0.3);
     background:rgba(30,27,75,0.8); color:#c4b5fd;
 }
-/* ── Status box ── */
 .status-out textarea {
-    font-family: 'JetBrains Mono', monospace !important;
-    font-size: 0.8rem !important;
-    color: #a5f3fc !important;
+    font-family: monospace !important;
+    font-size: 0.82rem !important;
 }
-/* ── Gallery ── */
-.gallery-wrap { border-radius:16px; overflow:hidden; }
-/* ── Footer ── */
 #footer { text-align:center; color:#4b5563; font-size:0.78rem; margin-top:24px; }
 #footer b { color:#7c3aed; }
 """
 
 EXAMPLES = [
-    ["A Bengal tiger in a neon-lit Tokyo alley at midnight, heavy rain", "⚡ Neon Cyberpunk",     2, "🖥️ Landscape 3:2 (1216×832)",  4, 0.0, 42,  True],
-    ["Tamil Chola warrior queen in golden armor, palace at dusk",        "🏰 Dark Fantasy Epic",  2, "📱 Portrait 9:16 (768×1344)",   4, 0.0, 77,  True],
-    ["Nexflow AI startup logo, geometric, purple gradient, minimal",     "◻️ Clean Minimalist",   1, "⬜ Square 1:1 (1024×1024)",     4, 0.0, 13,  False],
-    ["Cozy mountain coffee shop interior, misty morning, warm lights",   "📷 Photorealistic",     2, "🖥️ Landscape 3:2 (1216×832)",  4, 0.0, -1,  True],
-    ["Abstract AI neural network, glowing nodes, deep space background", "🔮 3D Render / Blender",2, "📺 Widescreen 16:9 (1344×768)", 4, 0.0, -1,  True],
-    ["Portrait of elderly Indian grandfather, morning village light",    "📷 Photorealistic",     2, "🖼️ Portrait 2:3 (832×1216)",   4, 0.0, -1,  True],
+    ["A Bengal tiger in a neon-lit Tokyo alley at midnight, heavy rain",  "⚡ Neon Cyberpunk",     2, "🖥️ Landscape 3:2 (1216×832)",  4, 0.0, 42,  True],
+    ["Tamil Chola warrior queen in golden armor, palace at dusk",         "🏰 Dark Fantasy Epic",  2, "📱 Portrait 9:16 (768×1344)",   4, 0.0, 77,  True],
+    ["Nexflow AI startup logo, geometric, purple gradient, minimal",      "◻️ Clean Minimalist",   1, "⬜ Square 1:1 (1024×1024)",     4, 0.0, 13,  False],
+    ["Cozy mountain coffee shop interior, misty morning, warm lights",    "📷 Photorealistic",     2, "🖥️ Landscape 3:2 (1216×832)",  4, 0.0, -1,  True],
+    ["Abstract AI neural network, glowing nodes, deep space background",  "🔮 3D Render / Blender",2, "📺 Widescreen 16:9 (1344×768)", 4, 0.0, -1,  True],
+    ["Portrait of elderly Indian grandfather, morning village light",     "📷 Photorealistic",     2, "🖼️ Portrait 2:3 (832×1216)",   4, 0.0, -1,  True],
 ]
 
 with gr.Blocks(css=CSS, title="⚡ FLUX Image Studio — Nexflow Studio") as demo:
 
-    # ── Hero ──────────────────────────────────────────────────────
     gr.HTML("""
     <div id="hero">
         <h1>⚡ FLUX Image Studio</h1>
@@ -342,16 +319,14 @@ with gr.Blocks(css=CSS, title="⚡ FLUX Image Studio — Nexflow Studio") as dem
             <span class="badge">🔓 Apache 2.0</span>
             <span class="badge">🖼️ Batch Generation</span>
             <span class="badge">🧠 AI Prompt Engine</span>
-            <span class="badge">⚡ ZeroGPU H200</span>
-            <span class="badge">🎯 FLUX.1-schnell</span>
+            <span class="badge">⚡ FLUX.1-schnell</span>
+            <span class="badge">🎯 HF Inference API</span>
             <span class="badge">🔁 High Consistency</span>
         </div>
     </div>
     """)
 
     with gr.Row(equal_height=False):
-
-        # ── LEFT: Controls ────────────────────────────────────────
         with gr.Column(scale=1, min_width=420):
 
             prompt_in = gr.Textbox(
@@ -362,23 +337,20 @@ with gr.Blocks(css=CSS, title="⚡ FLUX Image Studio — Nexflow Studio") as dem
                 ),
                 lines=4, max_lines=8,
             )
-
             with gr.Row():
                 enhance_chk = gr.Checkbox(
-                    label="✨ AI Enhance Prompt  (Qwen2.5-7B)",
+                    label="✨ AI Enhance Prompt (Qwen2.5-7B)",
                     value=True, scale=3,
                 )
                 num_slider = gr.Slider(
-                    1, MAX_IMAGES, value=2, step=1,
+                    1, MAX_IMGS, value=2, step=1,
                     label="🖼️ Images", scale=1,
                 )
-
             enhanced_out = gr.Textbox(
                 label="📝 Final Prompt → Model",
                 interactive=False, lines=3,
                 placeholder="Enhanced prompt appears here after generation...",
             )
-
             with gr.Row():
                 style_dd = gr.Dropdown(
                     choices=list(STYLES.keys()),
@@ -390,19 +362,18 @@ with gr.Blocks(css=CSS, title="⚡ FLUX Image Studio — Nexflow Studio") as dem
                     value="⬜ Square 1:1 (1024×1024)",
                     label="📐 Aspect Ratio", scale=2,
                 )
-
             with gr.Accordion("⚙️ Advanced", open=False):
                 with gr.Row():
                     steps_sl = gr.Slider(
                         1, 8, value=4, step=1,
-                        label="Inference Steps  (4 = optimal for schnell)",
+                        label="Steps (4 = optimal)",
                     )
                     guidance_sl = gr.Slider(
                         0.0, 7.5, value=0.0, step=0.5,
-                        label="Guidance Scale  (0 = optimal for schnell)",
+                        label="Guidance Scale (0 = optimal)",
                     )
                 seed_num = gr.Number(
-                    label="🎲 Seed  (−1 = random | same seed = same style across runs)",
+                    label="🎲 Seed  (−1 = random | fixed seed = consistent style)",
                     value=-1, precision=0,
                 )
                 neg_in = gr.Textbox(
@@ -416,20 +387,17 @@ with gr.Blocks(css=CSS, title="⚡ FLUX Image Studio — Nexflow Studio") as dem
                 elem_classes="generate-btn",
                 size="lg",
             )
-
             status_out = gr.Textbox(
                 label="📊 Status",
                 interactive=False,
                 lines=2,
                 elem_classes="status-out",
             )
-
             dl_btn = gr.File(
                 label="📥 Download All as ZIP",
                 visible=False,
             )
 
-        # ── RIGHT: Gallery ────────────────────────────────────────
         with gr.Column(scale=1):
             gallery_out = gr.Gallery(
                 label="🖼️ Generated Images",
@@ -439,10 +407,8 @@ with gr.Blocks(css=CSS, title="⚡ FLUX Image Studio — Nexflow Studio") as dem
                 show_download_button=True,
                 show_share_button=True,
                 preview=True,
-                elem_classes="gallery-wrap",
             )
 
-    # ── Examples ──────────────────────────────────────────────────
     gr.Examples(
         examples=EXAMPLES,
         inputs=[
@@ -453,17 +419,15 @@ with gr.Blocks(css=CSS, title="⚡ FLUX Image Studio — Nexflow Studio") as dem
         examples_per_page=6,
     )
 
-    # ── Footer ────────────────────────────────────────────────────
     gr.HTML("""
     <div id="footer">
         Powered by <b>FLUX.1-schnell</b> (Black Forest Labs · Apache 2.0) &nbsp;·&nbsp;
         Prompt AI: <b>Qwen2.5-7B-Instruct</b> &nbsp;·&nbsp;
-        GPU: <b>ZeroGPU H200</b> (Free) &nbsp;·&nbsp;
+        Inference: <b>HuggingFace API</b> (Free) &nbsp;·&nbsp;
         Built with ❤️ by <b>Nexflow Studio</b>
     </div>
     """)
 
-    # ── Wiring ────────────────────────────────────────────────────
     _inputs  = [prompt_in, style_dd, num_slider, ratio_dd,
                 steps_sl, guidance_sl, seed_num, enhance_chk, neg_in]
     _outputs = [gallery_out, status_out, enhanced_out, dl_btn, dl_btn]
