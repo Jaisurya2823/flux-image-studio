@@ -202,6 +202,19 @@ ENHANCE_SYSTEM = (
     "Output ONLY the enhanced prompt — no quotes, no explanation."
 )
 
+def clean_ascii(text: str) -> str:
+    """Remove special unicode chars that break URLs"""
+    replacements = {
+        '\u2011': '-', '\u2012': '-', '\u2013': '-', '\u2014': '-',
+        '\u2018': "'", '\u2019': "'", '\u201c': '"', '\u201d': '"',
+        '\u2026': '...', '\u00e2': '', '\u0080': '', '\u0091': "'",
+        '\u0092': "'", '\u0093': '"', '\u0094': '"',
+    }
+    for k, v in replacements.items():
+        text = text.replace(k, v)
+    # Keep only ASCII printable chars
+    return ''.join(c for c in text if ord(c) < 128)
+
 def enhance_prompt(raw: str, enabled: bool) -> str:
     if not enabled or not raw.strip():
         return raw.strip()
@@ -223,6 +236,7 @@ def enhance_prompt(raw: str, enabled: bool) -> str:
         resp.raise_for_status()
         data = resp.json()
         enhanced = data["choices"][0]["message"]["content"].strip().strip('"').strip("'")
+        enhanced = clean_ascii(enhanced)
         return enhanced if len(enhanced) > 15 else raw.strip()
     except Exception as e:
         st.warning(f"Prompt enhancement skipped: {e}")
@@ -233,7 +247,9 @@ def enhance_prompt(raw: str, enabled: bool) -> str:
 # ════════════════════════════════════════════════════════════════════
 def generate_image(prompt: str, neg: str, width: int, height: int, seed: int) -> Image.Image:
     import urllib.parse
-    encoded = urllib.parse.quote(prompt)
+    # Clean prompt — remove special unicode chars that break URLs
+    clean = clean_ascii(prompt)
+    encoded = urllib.parse.quote(clean)
     url = (
         f"https://image.pollinations.ai/prompt/{encoded}"
         f"?model=flux"
@@ -241,19 +257,21 @@ def generate_image(prompt: str, neg: str, width: int, height: int, seed: int) ->
         f"&height={height}"
         f"&seed={seed}"
         f"&nologo=true"
+        f"&nofeed=true"
         f"&enhance=false"
         f"&private=true"
     )
-    for attempt in range(3):
+    for attempt in range(4):
         try:
+            time.sleep(attempt * 4)  # Back off: 0s, 4s, 8s, 12s
             resp = requests.get(url, timeout=120)
             resp.raise_for_status()
-            return Image.open(io.BytesIO(resp.content))
+            img = Image.open(io.BytesIO(resp.content))
+            return img
         except Exception as e:
-            if attempt < 2:
-                time.sleep(5)
-            else:
-                raise e
+            if attempt < 3:
+                continue
+            raise e
 
 # ════════════════════════════════════════════════════════════════════
 #  ZIP helper
@@ -394,7 +412,7 @@ if generate_btn:
                 img = generate_image(final, neg_prompt, w, h, actual_seed + i)
                 images.append(img)
                 if i < num_images - 1:
-                    time.sleep(3)  # Prevent rate limiting
+                    time.sleep(8)  # Prevent rate limiting between images
 
                 # Show images as they arrive
                 with gallery_area.container():
@@ -435,6 +453,6 @@ st.markdown("""
 <div class="footer">
     Powered by <b>FLUX</b> (Pollinations.ai · Free) &nbsp;·&nbsp;
     Prompt AI: <b>GPT-4o mini</b> (Pollinations.ai · Free) &nbsp;·&nbsp;
-    Built with ❤️ by <b>JAI SURYA</b>
+    Built with ❤️ by <b>Nexflow Studio</b>
 </div>
 """, unsafe_allow_html=True)
