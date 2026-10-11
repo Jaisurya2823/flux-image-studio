@@ -228,17 +228,26 @@ def enhance_prompt(raw: str, enabled: bool, api_key: str) -> str:
         return raw.strip()
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        model = genai.GenerativeModel("gemini-3.8-flash")
         resp  = model.generate_content(
             f"{ENHANCE_SYSTEM}\n\nEnhance this prompt: {raw}"
         )
         enhanced = resp.text.strip().strip('"').strip("'")
-        # Strip any non-ASCII characters
         enhanced = ''.join(c for c in enhanced if ord(c) < 128)
         return enhanced if len(enhanced) > 15 else raw.strip()
     except Exception as e:
-        st.warning(f"Enhancement skipped: {e}")
-        return raw.strip()
+        try:
+            # fallback to flash-lite
+            model = genai.GenerativeModel("gemini-3.8-flash-lite")
+            resp  = model.generate_content(
+                f"{ENHANCE_SYSTEM}\n\nEnhance this prompt: {raw}"
+            )
+            enhanced = resp.text.strip().strip('"').strip("'")
+            enhanced = ''.join(c for c in enhanced if ord(c) < 128)
+            return enhanced if len(enhanced) > 15 else raw.strip()
+        except Exception as e2:
+            st.warning(f"Enhancement skipped: {e2}")
+            return raw.strip()
 
 # ════════════════════════════════════════════════════════════════════
 #  IMAGE GENERATION — Gemini 2.0 Flash Image (free, GPT-4o quality)
@@ -250,29 +259,54 @@ def generate_image_gemini(
     api_key: str,
 ) -> Image.Image:
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-2.0-flash-exp-image-generation")
 
     full_prompt = (
         f"{prompt}. "
-        f"Image dimensions: {width}x{height} pixels. "
+        f"Target dimensions: {width}x{height}. "
         f"High quality, no watermark, no text overlay, no logo."
     )
 
-    resp = model.generate_content(
-        full_prompt,
-        generation_config=genai.GenerationConfig(
-            response_modalities=["image", "text"],
-        ),
+    # Try imagen-3.0 first (best quality)
+    models_to_try = [
+        "imagen-3.0-generate-002",
+        "gemini-2.0-flash-preview-image-generation",
+        "gemini-2.0-flash-exp-image-generation",
+    ]
+
+    for model_name in models_to_try:
+        try:
+            if model_name.startswith("imagen"):
+                from google.generativeai import ImageGenerationModel
+                model = ImageGenerationModel(model_name)
+                result = model.generate_images(
+                    prompt=full_prompt,
+                    number_of_images=1,
+                    aspect_ratio="1:1" if width == height else ("9:16" if height > width else "16:9"),
+                )
+                if result.images:
+                    img_bytes = result.images[0]._image_bytes
+                    return Image.open(io.BytesIO(img_bytes))
+            else:
+                model = genai.GenerativeModel(model_name)
+                resp  = model.generate_content(
+                    full_prompt,
+                    generation_config={
+                        "response_modalities": ["IMAGE", "TEXT"],
+                    },
+                )
+                for part in resp.candidates[0].content.parts:
+                    if hasattr(part, "inline_data") and part.inline_data is not None:
+                        img_data = part.inline_data.data
+                        if isinstance(img_data, str):
+                            img_data = base64.b64decode(img_data)
+                        return Image.open(io.BytesIO(img_data))
+        except Exception:
+            continue
+
+    raise ValueError(
+        "Image generation failed on all models. "
+        "Make sure your Gemini API key has image generation enabled at aistudio.google.com"
     )
-
-    for part in resp.candidates[0].content.parts:
-        if part.inline_data is not None:
-            img_data = part.inline_data.data
-            if isinstance(img_data, str):
-                img_data = base64.b64decode(img_data)
-            return Image.open(io.BytesIO(img_data))
-
-    raise ValueError("No image returned from Gemini API")
 
 # ════════════════════════════════════════════════════════════════════
 #  GENERATE WITH KEY ROTATION + FALLBACK
