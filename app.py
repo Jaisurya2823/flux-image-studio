@@ -166,7 +166,7 @@ def enhance_prompt(raw: str, enabled: bool, api_key: str) -> str:
     try:
         client = genai.Client(api_key=api_key)
         resp = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents=f"{ENHANCE_SYSTEM}\n\nEnhance this prompt: {raw}",
         )
         enhanced = resp.text.strip().strip('"').strip("'")
@@ -184,16 +184,32 @@ def generate_image(prompt: str, aspect_ratio: str, api_key: str) -> Image.Image:
 
     full_prompt = f"{prompt}. High quality, no watermark, no text overlay, no logo, no signature."
 
-    resp = client.models.generate_content(
-        model="gemini-2.5-flash-image",
-        contents=full_prompt,
-        config=types.GenerateContentConfig(
-            response_modalities=["IMAGE", "TEXT"],
-            image_config=types.ImageConfig(
-                aspect_ratio=aspect_ratio,
-            ),
-        ),
-    )
+    # Try models in order — newest first, fallback to older
+    image_models = [
+        "gemini-2.5-flash-image-preview",
+        "gemini-2.5-flash-image",
+        "gemini-3.1-flash-image-preview",
+    ]
+    resp = None
+    last_err = None
+    for model_name in image_models:
+        try:
+            resp = client.models.generate_content(
+                model=model_name,
+                contents=full_prompt,
+                config=types.GenerateContentConfig(
+                    response_modalities=["IMAGE", "TEXT"],
+                    image_config=types.ImageConfig(
+                        aspect_ratio=aspect_ratio,
+                    ),
+                ),
+            )
+            break
+        except Exception as e:
+            last_err = e
+            continue
+    if resp is None:
+        raise ValueError(f"All image models failed. Last error: {last_err}")
 
     for part in resp.candidates[0].content.parts:
         if part.inline_data is not None:
