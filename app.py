@@ -242,11 +242,18 @@ def generate_image(prompt: str, neg: str, width: int, height: int, seed: int) ->
         f"&seed={seed}"
         f"&nologo=true"
         f"&enhance=false"
-        f"&negative={urllib.parse.quote(neg)}"
+        f"&private=true"
     )
-    resp = requests.get(url, timeout=120)
-    resp.raise_for_status()
-    return Image.open(io.BytesIO(resp.content))
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, timeout=120)
+            resp.raise_for_status()
+            return Image.open(io.BytesIO(resp.content))
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(5)
+            else:
+                raise e
 
 # ════════════════════════════════════════════════════════════════════
 #  ZIP helper
@@ -386,6 +393,8 @@ if generate_btn:
                 )
                 img = generate_image(final, neg_prompt, w, h, actual_seed + i)
                 images.append(img)
+                if i < num_images - 1:
+                    time.sleep(3)  # Prevent rate limiting
 
                 # Show images as they arrive
                 with gallery_area.container():
@@ -426,6 +435,6 @@ st.markdown("""
 <div class="footer">
     Powered by <b>FLUX</b> (Pollinations.ai · Free) &nbsp;·&nbsp;
     Prompt AI: <b>GPT-4o mini</b> (Pollinations.ai · Free) &nbsp;·&nbsp;
-    Built with ❤️ by <b>Nexflow Studio</b>
+    Built with ❤️ by <b>JAI SURYA</b>
 </div>
 """, unsafe_allow_html=True)
