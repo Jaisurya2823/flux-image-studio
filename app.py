@@ -1,9 +1,10 @@
 # ══════════════════════════════════════════════════════════════════════
 #  FLUX Image Studio — Nexflow Studio
 #  Platform : Streamlit Community Cloud (free)
-#  Images   : Google Gemini 2.0 Flash Image API (GPT-4o level, free)
-#  Prompt AI: Google Gemini Flash (free)
-#  Key Rotation: 4 keys × 500/day = 2000 images/day free
+#  Images   : gemini-2.5-flash-image via new google-genai SDK
+#  Prompt AI: gemini-3.8-flash (free)
+#  Key Rotation: 4 keys x 500/day = 2000 free images/day
+#  Built by  : JAI SURYA | Nexflow Studio
 # ══════════════════════════════════════════════════════════════════════
 
 import streamlit as st
@@ -13,7 +14,8 @@ import os
 import zipfile
 import time
 import base64
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from PIL import Image
 
 # ─── Page config ────────────────────────────────────────────────────
@@ -70,12 +72,6 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3);
     border-radius: 10px; padding: 10px 16px; color: #fca5a5; font-size: 0.85rem;
 }
-.key-badge {
-    display: inline-block; background: rgba(16,185,129,0.1);
-    border: 1px solid rgba(16,185,129,0.3); color: #6ee7b7;
-    padding: 2px 10px; border-radius: 99px; font-size: 0.7rem;
-    font-family: monospace; margin-left: 8px;
-}
 section[data-testid="stSidebar"] {
     background: #130d28 !important;
     border-right: 1px solid rgba(168,85,247,0.15);
@@ -92,265 +88,159 @@ footer { visibility: hidden; }
 """, unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════════════════
-#  KEY ROTATION SYSTEM
-#  Add your keys in Streamlit secrets:
-#  GEMINI_KEY_1 = "AIza..."
-#  GEMINI_KEY_2 = "AIza..."
-#  GEMINI_KEY_3 = "AIza..."
-#  GEMINI_KEY_4 = "AIza..."
+#  KEY ROTATION
 # ════════════════════════════════════════════════════════════════════
 def get_api_keys():
     keys = []
     for i in range(1, 5):
-        key = st.secrets.get(f"GEMINI_KEY_{i}", None)
-        if key and key.strip() and key != f"AIza_your_key_{i}_here":
-            keys.append(key.strip())
-    # Also check env vars (local dev)
+        k = st.secrets.get(f"GEMINI_KEY_{i}", "")
+        if k and k.strip() and not k.startswith("AIza_your"):
+            keys.append(k.strip())
     for i in range(1, 5):
-        key = os.environ.get(f"GEMINI_KEY_{i}", None)
-        if key and key.strip():
-            if key not in keys:
-                keys.append(key.strip())
+        k = os.environ.get(f"GEMINI_KEY_{i}", "")
+        if k and k.strip() and k not in keys:
+            keys.append(k.strip())
     return keys
 
-def get_next_key(keys: list, failed_keys: set) -> str:
-    available = [k for k in keys if k not in failed_keys]
-    if not available:
-        return None
-    return random.choice(available)
+def get_next_key(keys, failed):
+    available = [k for k in keys if k not in failed]
+    return random.choice(available) if available else None
 
 # ════════════════════════════════════════════════════════════════════
-#  STYLE PRESETS
+#  STYLES & RATIOS
 # ════════════════════════════════════════════════════════════════════
 STYLES = {
     "✨ None (Raw)": "",
-    "📷 Photorealistic": (
-        "hyperrealistic DSLR photography, 8K UHD, tack-sharp focus, "
-        "natural golden-hour lighting, shallow depth of field, "
-        "photojournalism, ultra-detailed texture, no watermark"
-    ),
-    "🎬 Cinematic": (
-        "cinematic widescreen movie still, dramatic lighting, "
-        "anamorphic lens flare, film grain, Hollywood color grade, "
-        "IMAX quality, epic composition, no watermark"
-    ),
-    "🎌 Anime / Studio Ghibli": (
-        "high quality anime illustration, Studio Ghibli aesthetic, "
-        "vibrant cel-shading, clean crisp line art, lush detailed background, "
-        "soft pastel palette, expressive character design, no watermark"
-    ),
-    "🎨 Digital Concept Art": (
-        "professional digital concept art, ArtStation quality, "
-        "volumetric cinematic lighting, intricate details, "
-        "matte painting technique, 4K render, no watermark"
-    ),
-    "🖌️ Oil Painting": (
-        "classical oil painting on canvas, rich impasto brushstrokes, "
-        "old master chiaroscuro lighting, museum-quality, no watermark"
-    ),
-    "💧 Watercolor": (
-        "delicate watercolor illustration, soft wet-on-wet washes, "
-        "translucent luminous colors, hand-painted paper grain, no watermark"
-    ),
-    "👾 Pixel Art": (
-        "crisp 16-bit pixel art, retro JRPG aesthetic, "
-        "clean pixel-perfect sprite work, vibrant limited palette, no watermark"
-    ),
-    "⚡ Neon Cyberpunk": (
-        "cyberpunk dystopian cityscape, vivid neon signs in purple cyan magenta, "
-        "rain-slicked reflective streets, holographic advertisements, "
-        "volumetric fog, ultra-high contrast, Blade Runner aesthetic, no watermark"
-    ),
-    "🏰 Dark Fantasy Epic": (
-        "epic dark fantasy digital art, dramatic stormy atmospheric lighting, "
-        "intricate gothic architectural details, cinematic hero composition, no watermark"
-    ),
-    "◻️ Clean Minimalist": (
-        "ultra-clean minimalist design, precise geometric composition, "
-        "generous negative space, modern Swiss aesthetic, no watermark"
-    ),
-    "🕰️ Vintage / Retro": (
-        "authentic vintage analog photography, Kodachrome film simulation, "
-        "warm faded tones, light leaks, grain, 1970s documentary aesthetic, no watermark"
-    ),
-    "🔮 3D Render / Blender": (
-        "photorealistic 3D CGI render, Blender Cycles path tracing, "
-        "physically-based materials, HDRI studio lighting, 8K render, no watermark"
-    ),
-    "✏️ Pencil Sketch": (
-        "detailed graphite pencil sketch, masterful cross-hatching, "
-        "fine line work, smudge shading, sketchbook texture, no watermark"
-    ),
-    "🪔 Indian Traditional Art": (
-        "Tanjore gold-leaf painting style, vibrant jewel-tone colors, "
-        "intricate mandala motifs, traditional Indian folk art, no watermark"
-    ),
-    "🌊 Surreal / Dreamlike": (
-        "hyper-surrealist fine art, impossible dreamlike geometry, "
-        "ethereal glowing atmosphere, Salvador Dali inspired, no watermark"
-    ),
+    "📷 Photorealistic": "hyperrealistic DSLR photography, 8K UHD, tack-sharp focus, natural golden-hour lighting, shallow depth of field, ultra-detailed texture",
+    "🎬 Cinematic": "cinematic widescreen movie still, dramatic lighting, anamorphic lens flare, film grain, Hollywood blockbuster color grade, IMAX quality",
+    "🎌 Anime / Studio Ghibli": "high quality anime illustration, Studio Ghibli aesthetic, vibrant cel-shading, clean crisp line art, lush detailed background, soft pastel palette",
+    "🎨 Digital Concept Art": "professional digital concept art, ArtStation quality, volumetric cinematic lighting, intricate details, 4K render",
+    "🖌️ Oil Painting": "classical oil painting on canvas, rich impasto brushstrokes, old master chiaroscuro lighting, museum-quality",
+    "💧 Watercolor": "delicate watercolor illustration, soft wet-on-wet washes, translucent luminous colors, hand-painted paper grain",
+    "👾 Pixel Art": "crisp 16-bit pixel art, retro JRPG aesthetic, clean pixel-perfect sprite work, vibrant limited palette",
+    "⚡ Neon Cyberpunk": "cyberpunk dystopian cityscape, vivid neon signs in purple cyan magenta, rain-slicked reflective streets, holographic advertisements, Blade Runner aesthetic",
+    "🏰 Dark Fantasy Epic": "epic dark fantasy digital art, dramatic stormy atmospheric lighting, intricate gothic architectural details, cinematic hero composition",
+    "◻️ Clean Minimalist": "ultra-clean minimalist design, precise geometric composition, generous negative space, modern Swiss aesthetic",
+    "🕰️ Vintage / Retro": "authentic vintage analog photography, Kodachrome film simulation, warm faded tones, light leaks, grain, 1970s documentary aesthetic",
+    "🔮 3D Render / Blender": "photorealistic 3D CGI render, Blender Cycles path tracing, physically-based materials, HDRI studio lighting, 8K render",
+    "✏️ Pencil Sketch": "detailed graphite pencil sketch, masterful cross-hatching, fine line work, smudge shading, sketchbook texture",
+    "🪔 Indian Traditional Art": "Tanjore gold-leaf painting style, vibrant jewel-tone colors, intricate mandala motifs, traditional Indian folk art",
+    "🌊 Surreal / Dreamlike": "hyper-surrealist fine art, impossible dreamlike geometry, ethereal glowing atmosphere, Salvador Dali inspired",
 }
 
 RATIOS = {
-    "⬜ Square 1:1 (1024×1024)":     (1024, 1024),
-    "📱 Portrait 9:16 (768×1344)":   (768,  1344),
-    "🖼️ Portrait 2:3 (832×1216)":   (832,  1216),
-    "🖥️ Landscape 3:2 (1216×832)":  (1216,  832),
-    "📺 Widescreen 16:9 (1344×768)": (1344,  768),
-    "🎬 Ultrawide 21:9 (1536×640)":  (1536,  640),
-    "📷 Classic 4:3 (1152×864)":     (1152,  864),
+    "⬜ Square 1:1 (1024×1024)":     ("1:1",   1024, 1024),
+    "📱 Portrait 9:16 (768×1344)":   ("9:16",  768,  1344),
+    "🖼️ Portrait 2:3 (832×1216)":   ("3:4",   832,  1216),
+    "🖥️ Landscape 3:2 (1216×832)":  ("4:3",   1216,  832),
+    "📺 Widescreen 16:9 (1344×768)": ("16:9",  1344,  768),
+    "🎬 Ultrawide 21:9 (1536×640)":  ("16:9",  1536,  640),
+    "📷 Classic 4:3 (1152×864)":     ("4:3",   1152,  864),
 }
 
 EXAMPLES = [
-    ("A Bengal tiger in a neon-lit Tokyo alley at midnight, heavy rain",  "⚡ Neon Cyberpunk",      "🖥️ Landscape 3:2 (1216×832)",  42),
-    ("Tamil Chola warrior queen in golden armor, palace at dusk",         "🏰 Dark Fantasy Epic",   "📱 Portrait 9:16 (768×1344)",   77),
-    ("Nexflow AI startup logo, geometric, purple gradient, minimal",      "◻️ Clean Minimalist",    "⬜ Square 1:1 (1024×1024)",     13),
-    ("Anime school boy and girl on rooftop watching stars at night",      "🎌 Anime / Studio Ghibli","📺 Widescreen 16:9 (1344×768)", 99),
-    ("Abstract AI neural network, glowing nodes, deep space background",  "🔮 3D Render / Blender", "📺 Widescreen 16:9 (1344×768)", -1),
-    ("Portrait of elderly Indian grandfather, morning village light",     "📷 Photorealistic",      "🖼️ Portrait 2:3 (832×1216)",   -1),
+    ("A Bengal tiger in a neon-lit Tokyo alley at midnight, heavy rain",  "⚡ Neon Cyberpunk",      "🖥️ Landscape 3:2 (1216×832)"),
+    ("Tamil Chola warrior queen in golden armor, palace at dusk",         "🏰 Dark Fantasy Epic",   "📱 Portrait 9:16 (768×1344)"),
+    ("Nexflow AI startup logo, geometric, purple gradient, minimal",      "◻️ Clean Minimalist",    "⬜ Square 1:1 (1024×1024)"),
+    ("Anime school boy and girl on rooftop watching stars at night",      "🎌 Anime / Studio Ghibli","📺 Widescreen 16:9 (1344×768)"),
+    ("Abstract AI neural network, glowing nodes, deep space background",  "🔮 3D Render / Blender", "📺 Widescreen 16:9 (1344×768)"),
+    ("Portrait of elderly Indian grandfather, morning village light",     "📷 Photorealistic",      "🖼️ Portrait 2:3 (832×1216)"),
 ]
 
 # ════════════════════════════════════════════════════════════════════
-#  PROMPT ENHANCEMENT — Gemini Flash (free, fast)
+#  PROMPT ENHANCEMENT
 # ════════════════════════════════════════════════════════════════════
 ENHANCE_SYSTEM = """You are a world-class AI image prompt engineer.
-Transform the user's short prompt into a rich, detailed generation prompt.
+Transform the short prompt into a rich, detailed generation prompt.
 Rules:
 - Preserve exact subject and intent
 - Add: lighting, camera angle, composition, color palette, atmosphere, texture, mood
 - Use natural comma-separated phrases only
-- Maximum 120 words
-- Use only simple ASCII characters, no special symbols or unicode dashes
-- Output ONLY the enhanced prompt, nothing else"""
+- Maximum 100 words
+- Use only simple ASCII characters, no special unicode symbols
+- Output ONLY the enhanced prompt, nothing else, no explanation"""
 
 def enhance_prompt(raw: str, enabled: bool, api_key: str) -> str:
     if not enabled or not raw.strip() or not api_key:
         return raw.strip()
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-3.8-flash")
-        resp  = model.generate_content(
-            f"{ENHANCE_SYSTEM}\n\nEnhance this prompt: {raw}"
+        client = genai.Client(api_key=api_key)
+        resp = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=f"{ENHANCE_SYSTEM}\n\nEnhance this prompt: {raw}",
         )
         enhanced = resp.text.strip().strip('"').strip("'")
         enhanced = ''.join(c for c in enhanced if ord(c) < 128)
         return enhanced if len(enhanced) > 15 else raw.strip()
     except Exception as e:
-        try:
-            # fallback to flash-lite
-            model = genai.GenerativeModel("gemini-3.8-flash-lite")
-            resp  = model.generate_content(
-                f"{ENHANCE_SYSTEM}\n\nEnhance this prompt: {raw}"
-            )
-            enhanced = resp.text.strip().strip('"').strip("'")
-            enhanced = ''.join(c for c in enhanced if ord(c) < 128)
-            return enhanced if len(enhanced) > 15 else raw.strip()
-        except Exception as e2:
-            st.warning(f"Enhancement skipped: {e2}")
-            return raw.strip()
+        st.warning(f"Enhancement skipped: {e}")
+        return raw.strip()
 
 # ════════════════════════════════════════════════════════════════════
-#  IMAGE GENERATION — Gemini 2.0 Flash Image (free, GPT-4o quality)
+#  IMAGE GENERATION — gemini-2.5-flash-image (correct current model)
 # ════════════════════════════════════════════════════════════════════
-def generate_image_gemini(
-    prompt: str,
-    width: int,
-    height: int,
-    api_key: str,
-) -> Image.Image:
-    genai.configure(api_key=api_key)
+def generate_image(prompt: str, aspect_ratio: str, api_key: str) -> Image.Image:
+    client = genai.Client(api_key=api_key)
 
-    full_prompt = (
-        f"{prompt}. "
-        f"Target dimensions: {width}x{height}. "
-        f"High quality, no watermark, no text overlay, no logo."
+    full_prompt = f"{prompt}. High quality, no watermark, no text overlay, no logo, no signature."
+
+    resp = client.models.generate_content(
+        model="gemini-2.5-flash-image",
+        contents=full_prompt,
+        config=types.GenerateContentConfig(
+            response_modalities=["IMAGE", "TEXT"],
+            image_config=types.ImageConfig(
+                aspect_ratio=aspect_ratio,
+            ),
+        ),
     )
 
-    # Try imagen-3.0 first (best quality)
-    models_to_try = [
-        "imagen-3.0-generate-002",
-        "gemini-2.0-flash-preview-image-generation",
-        "gemini-2.0-flash-exp-image-generation",
-    ]
+    for part in resp.candidates[0].content.parts:
+        if part.inline_data is not None:
+            img_data = part.inline_data.data
+            if isinstance(img_data, str):
+                img_data = base64.b64decode(img_data)
+            return Image.open(io.BytesIO(img_data))
 
-    for model_name in models_to_try:
-        try:
-            if model_name.startswith("imagen"):
-                from google.generativeai import ImageGenerationModel
-                model = ImageGenerationModel(model_name)
-                result = model.generate_images(
-                    prompt=full_prompt,
-                    number_of_images=1,
-                    aspect_ratio="1:1" if width == height else ("9:16" if height > width else "16:9"),
-                )
-                if result.images:
-                    img_bytes = result.images[0]._image_bytes
-                    return Image.open(io.BytesIO(img_bytes))
-            else:
-                model = genai.GenerativeModel(model_name)
-                resp  = model.generate_content(
-                    full_prompt,
-                    generation_config={
-                        "response_modalities": ["IMAGE", "TEXT"],
-                    },
-                )
-                for part in resp.candidates[0].content.parts:
-                    if hasattr(part, "inline_data") and part.inline_data is not None:
-                        img_data = part.inline_data.data
-                        if isinstance(img_data, str):
-                            img_data = base64.b64decode(img_data)
-                        return Image.open(io.BytesIO(img_data))
-        except Exception:
-            continue
-
-    raise ValueError(
-        "Image generation failed on all models. "
-        "Make sure your Gemini API key has image generation enabled at aistudio.google.com"
-    )
+    raise ValueError("No image in response. Check your API key permissions at aistudio.google.com")
 
 # ════════════════════════════════════════════════════════════════════
-#  GENERATE WITH KEY ROTATION + FALLBACK
+#  KEY ROTATION WRAPPER
 # ════════════════════════════════════════════════════════════════════
-def generate_with_rotation(
-    prompt: str,
-    width: int,
-    height: int,
-    keys: list,
-) -> tuple:
-    failed_keys = set()
-    last_error  = None
-
+def generate_with_rotation(prompt: str, aspect_ratio: str, keys: list) -> tuple:
+    failed = set()
+    last_err = None
     while True:
-        key = get_next_key(keys, failed_keys)
+        key = get_next_key(keys, failed)
         if key is None:
-            raise Exception(
-                f"All {len(keys)} API keys exhausted or rate limited. "
-                f"Last error: {last_error}"
-            )
+            raise Exception(f"All keys exhausted. Last error: {last_err}")
         try:
-            img = generate_image_gemini(prompt, width, height, key)
-            key_num = keys.index(key) + 1
-            return img, key_num
+            img = generate_image(prompt, aspect_ratio, key)
+            return img, keys.index(key) + 1
         except Exception as e:
-            err_str = str(e).lower()
-            if any(x in err_str for x in ["quota", "rate", "limit", "429", "exhausted"]):
-                failed_keys.add(key)
-                last_error = str(e)
-                time.sleep(2)
+            err = str(e).lower()
+            if any(x in err for x in ["quota", "rate", "limit", "429", "exhausted", "resource"]):
+                failed.add(key)
+                last_err = str(e)
+                time.sleep(3)
                 continue
-            else:
-                raise e
+            raise e
 
 # ════════════════════════════════════════════════════════════════════
 #  ZIP HELPER
 # ════════════════════════════════════════════════════════════════════
-def make_zip(images: list, seed: int) -> bytes:
+def make_zip(images: list, run_id: int) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for i, img in enumerate(images):
             ibuf = io.BytesIO()
             img.save(ibuf, format="PNG")
-            zf.writestr(f"nexflow_{i+1:02d}_seed{seed}.png", ibuf.getvalue())
+            zf.writestr(f"nexflow_image_{i+1:02d}_{run_id}.png", ibuf.getvalue())
+    return buf.getvalue()
+
+def img_to_bytes(img: Image.Image) -> bytes:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
     return buf.getvalue()
 
 # ════════════════════════════════════════════════════════════════════
@@ -365,19 +255,19 @@ st.markdown("""
     <div class="badges">
         <span class="badge">🆓 100% Free</span>
         <span class="badge">🔓 Open Source</span>
-        <span class="badge">🧠 Gemini 2.0 Flash Image</span>
+        <span class="badge">🧠 Gemini 2.5 Flash Image</span>
         <span class="badge">🔁 Auto Key Rotation</span>
         <span class="badge">🖼️ Batch Generation</span>
         <span class="badge">💎 GPT-4o Level Quality</span>
-        <span class="badge">❤️ Nexflow Studio</span>
+        <span class="badge">❤️ JAI SURYA</span>
     </div>
 </div>
 """, unsafe_allow_html=True)
 
-# Key status
 if not keys:
     st.error(
-        "⚠️ No API keys found. Add your Gemini keys in Streamlit Secrets:\n\n"
+        "⚠️ No API keys found!\n\n"
+        "Go to: Manage app → Settings → Secrets → add:\n\n"
         "```\nGEMINI_KEY_1 = 'AIza...'\n"
         "GEMINI_KEY_2 = 'AIza...'\n"
         "GEMINI_KEY_3 = 'AIza...'\n"
@@ -386,22 +276,18 @@ if not keys:
     )
     st.stop()
 
-st.success(f"✅ {len(keys)} API key(s) active — up to {len(keys) * 500} free images/day with auto rotation")
+st.success(f"✅ {len(keys)} key(s) active — up to {len(keys) * 500} free images/day with auto rotation")
 
-# ── Sidebar ──────────────────────────────────────────────────────────
+# ── Sidebar ───────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### 🎨 Style & Layout")
     style      = st.selectbox("Style Preset", list(STYLES.keys()), index=0)
-    ratio      = st.selectbox("Aspect Ratio", list(RATIOS.keys()), index=0)
+    ratio_key  = st.selectbox("Aspect Ratio", list(RATIOS.keys()), index=0)
     num_images = st.slider("Number of Images", 1, 4, 1)
 
     st.markdown("---")
     st.markdown("### ⚙️ Advanced")
     use_enhance = st.toggle("✨ AI Enhance Prompt (Gemini Flash)", value=True)
-    seed = st.number_input(
-        "Seed (-1 = random)", value=-1, step=1,
-        help="Same seed = consistent style across runs",
-    )
 
     st.markdown("---")
     st.markdown("### 🔑 Key Status")
@@ -410,22 +296,18 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 💡 Examples")
-    for i, (ep, es, er, eseed) in enumerate(EXAMPLES):
+    for i, (ep, es, er) in enumerate(EXAMPLES):
         if st.button(f"#{i+1} {ep[:36]}...", key=f"ex_{i}"):
-            st.session_state.update({
-                "ex_prompt": ep, "ex_style": es,
-                "ex_ratio": er, "ex_seed": eseed,
-            })
+            st.session_state.update({"ex_prompt": ep, "ex_style": es, "ex_ratio": er})
             st.rerun()
 
-# ── Main ─────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────
 col_left, col_right = st.columns([1, 1], gap="large")
 
 with col_left:
     if "ex_style" in st.session_state:
-        style = st.session_state.pop("ex_style", style)
-        ratio = st.session_state.pop("ex_ratio", ratio)
-        seed  = st.session_state.pop("ex_seed",  seed)
+        style     = st.session_state.pop("ex_style", style)
+        ratio_key = st.session_state.pop("ex_ratio", ratio_key)
 
     prompt = st.text_area(
         "✏️ Your Prompt",
@@ -451,61 +333,54 @@ with col_right:
         unsafe_allow_html=True,
     )
 
-# ── Generation ───────────────────────────────────────────────────────
+# ── Generation ────────────────────────────────────────────────────
 if generate_btn:
     if not prompt.strip():
         status_area.markdown(
-            '<div class="status-err">⚠️ Please enter a prompt first.</div>',
+            '<div class="status-err">⚠️ Please enter a prompt.</div>',
             unsafe_allow_html=True,
         )
     else:
-        t0 = time.time()
+        t0     = time.time()
+        run_id = random.randint(1000, 9999)
 
         # 1. Enhance
-        with st.spinner("✨ Enhancing prompt with Gemini Flash..."):
+        with st.spinner("✨ Enhancing prompt..."):
             enhanced = enhance_prompt(prompt, use_enhance, keys[0])
 
         # 2. Build final prompt
         suffix = STYLES.get(style, "")
         final  = f"{enhanced}, {suffix}" if suffix else enhanced
+        enhanced_box.text_area("📝 Final Prompt → Gemini", value=final, height=90, disabled=True)
 
-        enhanced_box.text_area(
-            "📝 Final Prompt → Gemini Image Model",
-            value=final, height=100, disabled=True,
-        )
+        # 3. Aspect ratio
+        aspect_ratio, w, h = RATIOS.get(ratio_key, ("1:1", 1024, 1024))
 
-        # 3. Dimensions + seed
-        w, h        = RATIOS.get(ratio, (1024, 1024))
-        actual_seed = int(seed) if int(seed) != -1 else random.randint(0, 999999)
-
-        # 4. Generate with key rotation
-        progress = st.progress(0, text="🎨 Generating with Gemini 2.0 Flash Image...")
+        # 4. Generate
+        progress = st.progress(0, text="🎨 Generating with Gemini 2.5 Flash Image...")
         images   = []
 
         try:
             for i in range(num_images):
                 progress.progress(
                     i / num_images,
-                    text=f"🎨 Generating image {i+1} of {num_images}... (auto key rotation active)",
+                    text=f"🎨 Image {i+1} of {num_images} — auto key rotation active...",
                 )
-                img, key_used = generate_with_rotation(final, w, h, keys)
+                img, key_num = generate_with_rotation(final, aspect_ratio, keys)
                 images.append(img)
 
-                # Show images progressively with download buttons
+                # Show gallery progressively with per-image download
                 with gallery_area.container():
                     cols = st.columns(2)
                     for j, im in enumerate(images):
                         with cols[j % 2]:
                             st.image(im, use_container_width=True)
-                            # Per-image download
-                            ibuf = io.BytesIO()
-                            im.save(ibuf, format="PNG")
                             st.download_button(
                                 label=f"⬇️ Download Image {j+1}",
-                                data=ibuf.getvalue(),
-                                file_name=f"nexflow_image_{j+1}_seed{actual_seed}.png",
+                                data=img_to_bytes(im),
+                                file_name=f"nexflow_{j+1}_{run_id}.png",
                                 mime="image/png",
-                                key=f"dl_img_{j}_{actual_seed}",
+                                key=f"dl_{j}_{run_id}_{i}",
                                 use_container_width=True,
                             )
 
@@ -517,18 +392,17 @@ if generate_btn:
 
             status_area.markdown(
                 f'<div class="status-ok">'
-                f'✅ {len(images)} image(s) ready · '
-                f'{elapsed:.1f}s · {w}×{h} · '
-                f'Gemini 2.0 Flash Image · No watermark'
+                f'✅ {len(images)} image(s) · {elapsed:.1f}s · '
+                f'Gemini 2.5 Flash Image · No watermark · {w}x{h}'
                 f'</div>',
                 unsafe_allow_html=True,
             )
 
-            zip_data = make_zip(images, actual_seed)
+            zip_data = make_zip(images, run_id)
             download_area.download_button(
-                label="📥 Download All Images (ZIP)",
+                label="📥 Download All as ZIP",
                 data=zip_data,
-                file_name=f"nexflow_gemini_seed{actual_seed}.zip",
+                file_name=f"nexflow_all_{run_id}.zip",
                 mime="application/zip",
                 use_container_width=True,
             )
@@ -543,9 +417,9 @@ if generate_btn:
 # Footer
 st.markdown("""
 <div class="footer">
-    Powered by <b>Gemini 2.0 Flash Image</b> (Google · Free) &nbsp;·&nbsp;
-    Prompt AI: <b>Gemini Flash</b> (Free) &nbsp;·&nbsp;
-    Auto Key Rotation: <b>4 Keys × 500/day</b> &nbsp;·&nbsp;
+    Powered by <b>Gemini 2.5 Flash Image</b> (Google · Free) &nbsp;·&nbsp;
+    Prompt AI: <b>Gemini 2.5 Flash</b> (Free) &nbsp;·&nbsp;
+    Auto Key Rotation: <b>4 Keys x 500/day</b> &nbsp;·&nbsp;
     Built with ❤️ by <b>JAI SURYA</b> &nbsp;·&nbsp; <b>Nexflow Studio</b>
 </div>
 """, unsafe_allow_html=True)
