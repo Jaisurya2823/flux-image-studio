@@ -14,6 +14,8 @@ import os
 import zipfile
 import time
 import base64
+import requests
+import urllib.parse
 from google import genai
 from google.genai import types
 from PIL import Image
@@ -179,68 +181,43 @@ def enhance_prompt(raw: str, enabled: bool, api_key: str) -> str:
 # ════════════════════════════════════════════════════════════════════
 #  IMAGE GENERATION — gemini-2.5-flash-image (correct current model)
 # ════════════════════════════════════════════════════════════════════
-def generate_image(prompt: str, aspect_ratio: str, api_key: str) -> Image.Image:
-    client = genai.Client(api_key=api_key)
+def generate_image(prompt: str, aspect_ratio: str, width: int, height: int) -> Image.Image:
+    # Clean prompt — ASCII only, no special chars that break URLs
+    clean = ''.join(c for c in prompt if ord(c) < 128)
+    # Truncate to safe URL length
+    if len(clean) > 400:
+        clean = clean[:400].rsplit(',', 1)[0]
 
-    full_prompt = f"{prompt}. High quality, no watermark, no text overlay, no logo, no signature."
-
-    # Try models in order — newest first, fallback to older
-    image_models = [
-        "gemini-2.5-flash-image-preview",
-        "gemini-2.5-flash-image",
-        "gemini-3.1-flash-image-preview",
-    ]
-    resp = None
-    last_err = None
-    for model_name in image_models:
+    encoded = urllib.parse.quote(clean)
+    url = (
+        f"https://image.pollinations.ai/prompt/{encoded}"
+        f"?model=flux-pro"
+        f"&width={width}"
+        f"&height={height}"
+        f"&seed={random.randint(1, 999999)}"
+        f"&nologo=true"
+        f"&nofeed=true"
+        f"&enhance=false"
+        f"&private=true"
+    )
+    for attempt in range(4):
         try:
-            resp = client.models.generate_content(
-                model=model_name,
-                contents=full_prompt,
-                config=types.GenerateContentConfig(
-                    response_modalities=["IMAGE", "TEXT"],
-                    image_config=types.ImageConfig(
-                        aspect_ratio=aspect_ratio,
-                    ),
-                ),
-            )
-            break
+            if attempt > 0:
+                time.sleep(attempt * 5)
+            resp = requests.get(url, timeout=120)
+            resp.raise_for_status()
+            return Image.open(io.BytesIO(resp.content))
         except Exception as e:
-            last_err = e
-            continue
-    if resp is None:
-        raise ValueError(f"All image models failed. Last error: {last_err}")
-
-    for part in resp.candidates[0].content.parts:
-        if part.inline_data is not None:
-            img_data = part.inline_data.data
-            if isinstance(img_data, str):
-                img_data = base64.b64decode(img_data)
-            return Image.open(io.BytesIO(img_data))
-
-    raise ValueError("No image in response. Check your API key permissions at aistudio.google.com")
+            if attempt == 3:
+                raise e
+    raise ValueError("Image generation failed after 4 attempts")
 
 # ════════════════════════════════════════════════════════════════════
 #  KEY ROTATION WRAPPER
 # ════════════════════════════════════════════════════════════════════
-def generate_with_rotation(prompt: str, aspect_ratio: str, keys: list) -> tuple:
-    failed = set()
-    last_err = None
-    while True:
-        key = get_next_key(keys, failed)
-        if key is None:
-            raise Exception(f"All keys exhausted. Last error: {last_err}")
-        try:
-            img = generate_image(prompt, aspect_ratio, key)
-            return img, keys.index(key) + 1
-        except Exception as e:
-            err = str(e).lower()
-            if any(x in err for x in ["quota", "rate", "limit", "429", "exhausted", "resource"]):
-                failed.add(key)
-                last_err = str(e)
-                time.sleep(3)
-                continue
-            raise e
+def generate_with_rotation(prompt: str, aspect_ratio: str, width: int, height: int, keys: list) -> tuple:
+    img = generate_image(prompt, aspect_ratio, width, height)
+    return img, 1
 
 # ════════════════════════════════════════════════════════════════════
 #  ZIP HELPER
@@ -271,7 +248,8 @@ st.markdown("""
     <div class="badges">
         <span class="badge">🆓 100% Free</span>
         <span class="badge">🔓 Open Source</span>
-        <span class="badge">🧠 Gemini 2.5 Flash Image</span>
+        <span class="badge">🧠 Gemini Prompt AI</span>
+        <span class="badge">⚡ FLUX Pro Images</span>
         <span class="badge">🔁 Auto Key Rotation</span>
         <span class="badge">🖼️ Batch Generation</span>
         <span class="badge">💎 GPT-4o Level Quality</span>
@@ -382,7 +360,7 @@ if generate_btn:
                     i / num_images,
                     text=f"🎨 Image {i+1} of {num_images} — auto key rotation active...",
                 )
-                img, key_num = generate_with_rotation(final, aspect_ratio, keys)
+                img, key_num = generate_with_rotation(final, aspect_ratio, w, h, keys)
                 images.append(img)
 
                 # Show gallery progressively with per-image download
@@ -408,8 +386,9 @@ if generate_btn:
 
             status_area.markdown(
                 f'<div class="status-ok">'
-                f'✅ {len(images)} image(s) · {elapsed:.1f}s · '
-                f'Gemini 2.5 Flash Image · No watermark · {w}x{h}'
+                f'✅ {len(images)} image(s) ready · '
+                f'{elapsed:.1f}s · {w}x{h} · '
+                f'FLUX Pro via Pollinations · Gemini Enhanced Prompt'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -433,9 +412,8 @@ if generate_btn:
 # Footer
 st.markdown("""
 <div class="footer">
-    Powered by <b>Gemini 2.5 Flash Image</b> (Google · Free) &nbsp;·&nbsp;
-    Prompt AI: <b>Gemini 2.5 Flash</b> (Free) &nbsp;·&nbsp;
-    Auto Key Rotation: <b>4 Keys x 500/day</b> &nbsp;·&nbsp;
+    Images: <b>FLUX Pro</b> (Pollinations · Free) &nbsp;·&nbsp;
+    Prompt AI: <b>Gemini 3.8 Flash</b> (Google · Free) &nbsp;·&nbsp;
     Built with ❤️ by <b>JAI SURYA</b> &nbsp;·&nbsp; <b>Nexflow Studio</b>
 </div>
 """, unsafe_allow_html=True)
