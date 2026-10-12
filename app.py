@@ -189,16 +189,19 @@ def generate_image(prompt: str, aspect_ratio: str, width: int, height: int) -> I
         clean = clean[:400].rsplit(',', 1)[0]
 
     encoded = urllib.parse.quote(clean)
+    seed    = random.randint(1, 999999)
     url = (
         f"https://image.pollinations.ai/prompt/{encoded}"
         f"?model=flux-pro"
         f"&width={width}"
         f"&height={height}"
-        f"&seed={random.randint(1, 999999)}"
+        f"&seed={seed}"
+        f"&steps=28"
         f"&nologo=true"
         f"&nofeed=true"
         f"&enhance=false"
         f"&private=true"
+        f"&safe=false"
     )
     for attempt in range(4):
         try:
@@ -352,55 +355,68 @@ if generate_btn:
 
         # 4. Generate
         progress = st.progress(0, text="🎨 Generating with Gemini 2.5 Flash Image...")
-        images   = []
+        images      = []
+        image_bytes = []  # Store bytes separately to avoid re-encoding
 
         try:
             for i in range(num_images):
                 progress.progress(
                     i / num_images,
-                    text=f"🎨 Image {i+1} of {num_images} — auto key rotation active...",
+                    text=f"🎨 Generating image {i+1} of {num_images}...",
                 )
-                img, key_num = generate_with_rotation(final, aspect_ratio, w, h, keys)
+                img, _ = generate_with_rotation(final, aspect_ratio, w, h, keys)
                 images.append(img)
+                image_bytes.append(img_to_bytes(img))
 
-                # Show gallery progressively with per-image download
+                # Show preview (no download buttons here — avoids key conflicts)
                 with gallery_area.container():
                     cols = st.columns(2)
                     for j, im in enumerate(images):
                         with cols[j % 2]:
-                            st.image(im, use_container_width=True)
-                            st.download_button(
-                                label=f"⬇️ Download Image {j+1}",
-                                data=img_to_bytes(im),
-                                file_name=f"nexflow_{j+1}_{run_id}.png",
-                                mime="image/png",
-                                key=f"dl_{j}_{run_id}_{i}",
-                                use_container_width=True,
-                            )
+                            st.image(im, use_container_width=True,
+                                     caption=f"Image {j+1} of {num_images}")
 
                 if i < num_images - 1:
-                    time.sleep(2)
+                    time.sleep(3)
 
-            progress.progress(1.0, text="✅ Done!")
+            progress.progress(1.0, text="✅ All images ready!")
             elapsed = time.time() - t0
 
             status_area.markdown(
                 f'<div class="status-ok">'
                 f'✅ {len(images)} image(s) ready · '
-                f'{elapsed:.1f}s · {w}x{h} · '
-                f'FLUX Pro via Pollinations · Gemini Enhanced Prompt'
+                f'{elapsed:.1f}s · {w}×{h} · FLUX Pro · Gemini Enhanced'
                 f'</div>',
                 unsafe_allow_html=True,
             )
 
-            zip_data = make_zip(images, run_id)
-            download_area.download_button(
-                label="📥 Download All as ZIP",
-                data=zip_data,
-                file_name=f"nexflow_all_{run_id}.zip",
-                mime="application/zip",
-                use_container_width=True,
-            )
+            # Final gallery with stable download buttons (rendered once, stable keys)
+            with gallery_area.container():
+                st.markdown("### 🖼️ Generated Images")
+                cols = st.columns(2)
+                for j, (im, ib) in enumerate(zip(images, image_bytes)):
+                    with cols[j % 2]:
+                        st.image(im, use_container_width=True)
+                        st.download_button(
+                            label=f"⬇️ Download Image {j+1}",
+                            data=ib,
+                            file_name=f"nexflow_img{j+1}_{run_id}.png",
+                            mime="image/png",
+                            key=f"final_dl_{run_id}_{j}",
+                            use_container_width=True,
+                        )
+
+            # ZIP download for all images
+            if len(images) > 1:
+                zip_data = make_zip(images, run_id)
+                download_area.download_button(
+                    label=f"📥 Download All {len(images)} Images (ZIP)",
+                    data=zip_data,
+                    file_name=f"nexflow_all_{run_id}.zip",
+                    mime="application/zip",
+                    key=f"zip_dl_{run_id}",
+                    use_container_width=True,
+                )
 
         except Exception as e:
             progress.empty()
